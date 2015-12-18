@@ -1,0 +1,195 @@
+#!/bin/bash
+################################################################################
+# Demobox Toolbox for Docker Entrypoints
+#
+# Provides a set of commands to be used in docker entrypoints.
+#
+# Copyright (c) 2015 Matthieu Bontemps <matthieu@demobox.io>
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is furnished
+# to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+#
+# #################################################################################
+set -e
+
+# Print out a single colored line.
+#
+# Usage:
+#   echolor RED "An error occured"
+function echolor {
+    NC='\033[0m'
+
+    COLOR=$1
+    shift
+    if [ ${COLOR} = "RED" ]; then
+        COLOR='\033[0;31m'
+    elif [ ${COLOR} = "GREEN" ]; then
+        COLOR='\033[0;32m'
+    elif [ ${COLOR} = "ORANGE" ]; then
+        COLOR='\033[0;33m'
+    elif [ ${COLOR} = "CYAN" ]; then
+        COLOR='\033[0;36m'
+    fi
+
+    MSG="$@"
+    echo -e ${COLOR}${MSG}${NC}
+}
+
+# Execute a command as another user while preserving its env.
+#
+# Usage:
+#   exec_as_user www-data touch ~/.demo
+function exec_as_user {
+    AS_USER=$1
+    shift
+    sudo --set-home --preserve-env -u ${AS_USER} -- $@
+}
+
+# Replace all instances following the format ${MY_VAR} by their environment value.
+#
+# Usage:
+#   subst_file FILE
+#
+# Requirements:
+#   awk, cp, rm
+function subst_file {
+    FILE=$1
+    TMP_FILE=/tmp/awk-tmp-subst
+    echolor CYAN "> Evaluating environment variables in ${FILE}"
+    # We use a (copied) temporary file so that the permissions stay the same
+    cp ${FILE} ${TMP_FILE}
+    awk '{while(match($0,"[$]{[^}]*}")) {var=substr($0,RSTART+2,RLENGTH -3);gsub("[$]{"var"}",ENVIRON[var])}}1' < ${TMP_FILE} > ${FILE}
+    rm ${TMP_FILE}
+}
+
+# Replace all instances following the format ${MY_VAR} in SUBST_PATH with the iname INAME.
+#
+# Usage:
+#   subst_all SUBST_PATH [INAME]
+#
+# Requirements:
+#   find, awk, cp, rm
+function subst_all {
+    SUBST_PATH=${1}
+    INAME=${2:-*}
+    find ${SUBST_PATH} -type f -iname ${INAME} -print0 | while IFS= read -r -d $'\0' FILE; do
+        subst_file ${FILE}
+    done
+}
+
+# Return true if a host is reachable on a given port.
+#
+# Usage:
+#   is_host_reachable HOSTNAME PORT
+#
+# Requirements:
+#   nc (from the netcat package)
+function is_host_reachable {
+    HOST=$1
+    PORT=$2
+    nc -z -w1 "${HOST}" "${PORT}"
+}
+
+# Wait for a port on a host to be open before exiting
+#
+# Usage:
+#   wait_for_port HOSTNAME PORT
+#
+# Requirements:
+#   nc (from the netcat package)
+function wait_for_port {
+    if [ "$#" -ne 2 ]; then
+        echo "Usage: wait_for_port HOSTNAME PORT"
+        exit 1
+    fi
+
+    HOST=$1
+    PORT=$2
+
+    INTERVAL=1
+    TIMEOUT=300
+    trap 'echo "Caught SIGUSR1"' SIGUSR1
+
+    if ! is_host_reachable ${HOST} ${PORT}; then
+        echolor CYAN "> Waiting for host ${HOST} to be available on port ${PORT}..."
+        t=0
+
+        until is_host_reachable ${HOST} ${PORT}; do
+            echolor ORANGE "> Still waiting for host ${HOST} on port ${PORT}..."
+            sleep ${INTERVAL}
+
+            t=$((t + ${INTERVAL}))
+
+            if [[ ${t} -ge ${TIMEOUT} ]]; then
+                echolor RED "> Host ${HOST} does not answer on port ${PORT} after ${t} seconds, exiting!"
+                exit 1
+            fi
+        done
+
+    fi
+    echolor GREEN "> Host ${HOST} is now available on port ${PORT}!"
+    echo
+}
+
+# Wait for a file to be created
+#
+# Usage:
+#   wait_for_file PATH
+#
+function wait_for_file {
+    if [ "$#" -ne 1 ]; then
+        echo "Usage: wait_for_file PATH"
+        exit 1
+    fi
+
+    FILE_PATH=$1
+
+    INTERVAL=1
+    TIMEOUT=300
+
+    if [ ! -f "${FILE_PATH}" ]; then
+        echolor CYAN "> Waiting for ${FILE_PATH} to be created..."
+        t=0
+
+        until [ -f "${FILE_PATH}" ]; do
+            echolor ORANGE "> Still waiting for ${FILE_PATH} to be created..."
+            sleep ${INTERVAL}
+
+            t=$((t + ${INTERVAL}))
+
+            if [[ ${t} -ge ${TIMEOUT} ]]; then
+                echolor RED "> ${FILE_PATH} does still not exist after ${t} seconds, exiting!"
+                exit 1
+            fi
+        done
+
+        echolor GREEN "> ${FILE_PATH} has been created!"
+        echo
+    fi
+}
+
+if [ $# -gt 0 ]; then
+    CMD=$1
+    if [ "$(type -t ${CMD})" = 'function' ]; then
+        shift
+        ${CMD} $@
+    else
+        echo "$0: Command ${CMD} does not exist."
+        exit 1
+    fi
+fi
